@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"github.com/dgraph-io/badger/v3"
 	abcitypes "github.com/tendermint/tendermint/abci/types"
+	"log"
 )
 
 type KVStoreApplication struct {
@@ -34,6 +35,17 @@ func (app *KVStoreApplication) Info(req abcitypes.RequestInfo) abcitypes.Respons
 }
 
 func (app *KVStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeliverTx {
+	if code := app.validateTx(req.Tx); code != 0 {
+		return abcitypes.ResponseDeliverTx{Code: code}
+	}
+
+	parts := bytes.SplitN(req.Tx, []byte("="), 2)
+	key, value := parts[0], parts[1]
+
+	if err := app.pendingBlock.Set(key,value); err != nil {
+		log.Panicf("Error with pendingBlock, unable to verify tx: %v", err)
+	}
+
 	return abcitypes.ResponseDeliverTx{Code: 0}
 }
 
@@ -43,11 +55,35 @@ func (app *KVStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcitypes.R
 }
 
 func (app *KVStoreApplication) Commit() abcitypes.ResponseCommit {
+	if err := app.pendingBlock.Commit(); err != nil {
+		log.Panicf("Error with pendingBlock, unable to commit the block: %v", err)
+	}
 	return abcitypes.ResponseCommit{}
 }
 
 func (app *KVStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.ResponseQuery {
-	return abcitypes.ResponseQuery{Code: 0}
+	resp := abcitypes.ResponseQuery{Key: req.Data}
+	dbErr := app.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(req.Data)
+		if err != nil {
+			if err != badger.ErrKeyNotFound {
+				return err
+			}
+			resp.Log = "key does not exit"
+			return nil
+		}
+
+		return item.Value(func(val []byte) error {
+			resp.Log = "exists"
+			resp.Value = val
+			return nil
+			
+		})
+	})
+	if dbErr != nil {
+		log.Panicf("Error with pendingBlock, unable to verify tx: %v", dbErr)
+	}
+	return resp
 }
 
 func (app *KVStoreApplication) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
@@ -55,6 +91,7 @@ func (app *KVStoreApplication) InitChain(req abcitypes.RequestInitChain) abcityp
 }
 
 func (app *KVStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
+	app.pendingBlock = app.db.NewTransaction(true)
 	return abcitypes.ResponseBeginBlock{}
 }
 
